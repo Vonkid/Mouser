@@ -88,6 +88,10 @@ class DaemonRuntime:
         self._stop_lock = threading.Lock()
 
     def start(self) -> None:
+        # A daemon crash or forced restart can leave the settings process alive.
+        # That process is authenticated to the old daemon bridge and will keep
+        # showing a stale disconnected state until it is replaced.
+        self.close_settings()
         self.control_server.start()
         self.bridge.start()
 
