@@ -2,7 +2,7 @@
 macOS mouse hook implementation.
 """
 
-import functools
+import ctypes
 import queue
 import sys
 import threading
@@ -31,12 +31,127 @@ except ImportError:
     )
 
 
-def _autoreleased(fn):
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        with objc.autorelease_pool():
-            return fn(*args, **kwargs)
-    return wrapper
+_CG_EVENT_TAP_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_uint32,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+
+
+class _NativeEventTapBridge:
+    """Create a CGEventTap without PyObjC's callback return bridge."""
+
+    def __init__(self, callback):
+        core_graphics_path = (
+            "/System/Library/Frameworks/ApplicationServices.framework/"
+            "Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+        core_foundation_path = (
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        self._core_graphics = ctypes.CDLL(core_graphics_path)
+        self._core_foundation = ctypes.CDLL(core_foundation_path)
+        self._callback = callback
+        self._c_callback = _CG_EVENT_TAP_CALLBACK(self._invoke)
+        self._configure_functions()
+
+    def _configure_functions(self):
+        self._core_graphics.CGEventTapCreate.argtypes = (
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint64,
+            _CG_EVENT_TAP_CALLBACK,
+            ctypes.c_void_p,
+        )
+        self._core_graphics.CGEventTapCreate.restype = ctypes.c_void_p
+        self._core_graphics.CGEventTapEnable.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_bool,
+        )
+        self._core_graphics.CGEventTapEnable.restype = None
+        self._core_graphics.CGEventTapIsEnabled.argtypes = (ctypes.c_void_p,)
+        self._core_graphics.CGEventTapIsEnabled.restype = ctypes.c_bool
+
+        self._core_foundation.CFMachPortCreateRunLoopSource.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_long,
+        )
+        self._core_foundation.CFMachPortCreateRunLoopSource.restype = ctypes.c_void_p
+        self._core_foundation.CFRunLoopGetCurrent.argtypes = ()
+        self._core_foundation.CFRunLoopGetCurrent.restype = ctypes.c_void_p
+        self._core_foundation.CFRunLoopAddSource.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        self._core_foundation.CFRunLoopAddSource.restype = None
+        self._core_foundation.CFRunLoopRemoveSource.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        self._core_foundation.CFRunLoopRemoveSource.restype = None
+        self._core_foundation.CFRelease.argtypes = (ctypes.c_void_p,)
+        self._core_foundation.CFRelease.restype = None
+        self._common_modes = ctypes.c_void_p.in_dll(
+            self._core_foundation, "kCFRunLoopCommonModes"
+        ).value
+
+    def _invoke(self, proxy, event_type, event_pointer, refcon):
+        if not event_pointer:
+            return None
+        try:
+            with objc.autorelease_pool():
+                cg_event = objc.objc_object(c_void_p=event_pointer)
+                result = self._callback(proxy, event_type, cg_event, refcon)
+                blocked = result is None
+                result = None
+                cg_event = None
+            return None if blocked else event_pointer
+        except Exception as exc:
+            print(f"[MouseHook] native event tap bridge error: {exc}", flush=True)
+            return event_pointer
+
+    def create(self, location, placement, options, event_mask):
+        return self._core_graphics.CGEventTapCreate(
+            location,
+            placement,
+            options,
+            event_mask,
+            self._c_callback,
+            None,
+        )
+
+    def enable(self, tap, enabled):
+        self._core_graphics.CGEventTapEnable(tap, enabled)
+
+    def is_enabled(self, tap):
+        return bool(self._core_graphics.CGEventTapIsEnabled(tap))
+
+    def add_to_current_run_loop(self, tap):
+        source = self._core_foundation.CFMachPortCreateRunLoopSource(None, tap, 0)
+        if not source:
+            return None
+        self._core_foundation.CFRunLoopAddSource(
+            self._core_foundation.CFRunLoopGetCurrent(),
+            source,
+            self._common_modes,
+        )
+        return source
+
+    def remove_from_current_run_loop(self, source):
+        self._core_foundation.CFRunLoopRemoveSource(
+            self._core_foundation.CFRunLoopGetCurrent(),
+            source,
+            self._common_modes,
+        )
+
+    def release(self, reference):
+        self._core_foundation.CFRelease(reference)
 
 
 _BTN_MIDDLE = 2
@@ -67,6 +182,7 @@ class MouseHook(BaseMouseHook):
         self._running = False
         self._tap = None
         self._tap_source = None
+        self._tap_bridge = None
         self.ignore_trackpad = True
         self._wake_observer = None
         self._session_resign_observer = None
@@ -231,7 +347,6 @@ class MouseHook(BaseMouseHook):
             with objc.autorelease_pool():
                 self._dispatch(event)
 
-    @_autoreleased
     def _event_tap_callback(self, proxy, event_type, cg_event, refcon):
         try:
             if event_type in (
@@ -246,7 +361,7 @@ class MouseHook(BaseMouseHook):
                 # A pending owner-gesture release may have been dropped while
                 # the tap was disabled -- abort it so the cursor can't freeze.
                 self.abort_button_gesture("tap_disabled")
-                Quartz.CGEventTapEnable(self._tap, True)
+                self._enable_event_tap(True)
                 return cg_event
 
             if not self._first_event_logged:
@@ -466,8 +581,8 @@ class MouseHook(BaseMouseHook):
 
         def _re_enable_tap_and_reconnect(reason):
             if self._tap and self._running:
-                Quartz.CGEventTapEnable(self._tap, True)
-                ok = Quartz.CGEventTapIsEnabled(self._tap)
+                self._enable_event_tap(True)
+                ok = self._event_tap_is_enabled()
                 print(
                     f"[MouseHook] Event tap re-enabled ({reason}): "
                     f"{'OK' if ok else 'FAILED — may need restart'}",
@@ -540,13 +655,12 @@ class MouseHook(BaseMouseHook):
             | Quartz.CGEventMaskBit(Quartz.kCGEventScrollWheel)
         )
 
-        self._tap = Quartz.CGEventTapCreate(
+        self._tap_bridge = _NativeEventTapBridge(self._event_tap_callback)
+        self._tap = self._tap_bridge.create(
             Quartz.kCGSessionEventTap,
             Quartz.kCGHeadInsertEventTap,
             Quartz.kCGEventTapOptionDefault,
             event_mask,
-            self._event_tap_callback,
-            None,
         )
 
         if self._tap is None:
@@ -559,13 +673,14 @@ class MouseHook(BaseMouseHook):
 
         print("[MouseHook] CGEventTap created successfully", flush=True)
 
-        self._tap_source = Quartz.CFMachPortCreateRunLoopSource(None, self._tap, 0)
-        Quartz.CFRunLoopAddSource(
-            Quartz.CFRunLoopGetCurrent(),
-            self._tap_source,
-            Quartz.kCFRunLoopCommonModes,
-        )
-        Quartz.CGEventTapEnable(self._tap, True)
+        self._tap_source = self._tap_bridge.add_to_current_run_loop(self._tap)
+        if self._tap_source is None:
+            self._tap_bridge.release(self._tap)
+            self._tap = None
+            self._tap_bridge = None
+            print("[MouseHook] ERROR: Failed to create event tap run-loop source!")
+            return False
+        self._enable_event_tap(True)
         print("[MouseHook] CGEventTap enabled and integrated with run loop", flush=True)
         self._running = True
 
@@ -588,20 +703,30 @@ class MouseHook(BaseMouseHook):
         self._connected_device = None
 
         if self._tap:
-            Quartz.CGEventTapEnable(self._tap, False)
+            self._enable_event_tap(False)
             if self._tap_source:
-                Quartz.CFRunLoopRemoveSource(
-                    Quartz.CFRunLoopGetCurrent(),
-                    self._tap_source,
-                    Quartz.kCFRunLoopCommonModes,
-                )
+                self._tap_bridge.remove_from_current_run_loop(self._tap_source)
+                self._tap_bridge.release(self._tap_source)
                 self._tap_source = None
+            self._tap_bridge.release(self._tap)
             self._tap = None
+            self._tap_bridge = None
             print("[MouseHook] CGEventTap disabled and removed", flush=True)
 
         if self._dispatch_thread:
             self._dispatch_thread.join(timeout=1)
             self._dispatch_thread = None
+
+    def _enable_event_tap(self, enabled):
+        if self._tap_bridge is not None:
+            self._tap_bridge.enable(self._tap, enabled)
+        else:
+            Quartz.CGEventTapEnable(self._tap, enabled)
+
+    def _event_tap_is_enabled(self):
+        if self._tap_bridge is not None:
+            return self._tap_bridge.is_enabled(self._tap)
+        return Quartz.CGEventTapIsEnabled(self._tap)
 
 
 MouseHook._platform_module = sys.modules[__name__]
