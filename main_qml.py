@@ -1198,17 +1198,6 @@ def _run_settings_process():
     # visibility transition may already have fired with no listener. Reconcile
     # the engine's frontend-visible flag now.
     _on_window_visibility_changed(root_window.visibility())
-    if sys.platform == "darwin":
-        global _MACOS_QUIT_FILTER
-        _MACOS_QUIT_FILTER = _MacOSQuitToTrayFilter(root_window, app)
-        app.installEventFilter(_MACOS_QUIT_FILTER)
-        app.commitDataRequest.connect(
-            lambda *_: _allow_macos_session_quit_if_requested(_MACOS_QUIT_FILTER)
-        )
-        app.saveStateRequest.connect(
-            lambda *_: _allow_macos_session_quit_if_requested(_MACOS_QUIT_FILTER)
-        )
-
     import queue
     from core.local_control import LocalControlServer
 
