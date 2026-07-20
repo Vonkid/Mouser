@@ -50,9 +50,15 @@ class ProcessSplitPolicyTests(unittest.TestCase):
         self.assertIn('process_command("--screenshot-process", action_id)', source)
 
     def test_settings_window_quits_instead_of_hiding(self):
-        source = (ROOT / "ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
-        self.assertIn('if (standaloneSettingsProcess)', source)
-        self.assertIn('Qt.quit()', source)
+        qml_source = (ROOT / "ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
+        self.assertIn('if (standaloneSettingsProcess)', qml_source)
+        self.assertIn('Qt.quit()', qml_source)
+
+        python_source = (ROOT / "main_qml.py").read_text(encoding="utf-8")
+        settings_start = python_source.index("def _run_settings_process():")
+        settings_end = python_source.index("\ndef _run_daemon():", settings_start)
+        settings_source = python_source[settings_start:settings_end]
+        self.assertNotIn("_MacOSQuitToTrayFilter", settings_source)
 
     def test_inactive_secondary_pages_are_unloaded(self):
         source = (ROOT / "ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
