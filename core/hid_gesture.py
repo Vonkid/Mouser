@@ -779,6 +779,8 @@ FEAT_BATTERY_STATUS = 0x1000      # Battery Status (fallback)
 FEAT_HAPTIC         = 0x19B0      # Haptic Feedback (MX Master 4)
 FEAT_FORCE_SENSING  = 0x19C0      # Force Sensing Button (MX Master 4)
 DEFAULT_GESTURE_CID = DEFAULT_GESTURE_CIDS[0]
+REPROG_DISCOVERY_TIMEOUT_MS = 400
+REPROG_DISCOVERY_RETRY_TIMEOUT_MS = 1200
 
 # REPROG_V4 ``setCidReporting`` control flags (fn 3 byte 2). The
 # protocol packs four bits we ever toggle from this module:
@@ -2649,10 +2651,12 @@ class HidGestureListener:
 
         Warm path: a cached ``last_device.json`` biases candidate and
         dev_idx ordering so the previously-working interface is probed
-        first with a tight 400 ms REPROG_V4 timeout. Cold path falls
-        back to the default direct-then-receiver scan with the same
-        per-slot timeout. On divert success the working tuple is
-        persisted so the next launch hits the warm path."""
+        first with a tight REPROG_V4 timeout. Cold path falls back to the
+        default direct-then-receiver scan with the same per-slot timeout.
+        To reduce false negatives on sleepy links (especially BLE wake),
+        the first devIdx probe gets one longer retry before moving on.
+        On divert success the working tuple is persisted so the next launch
+        hits the warm path."""
         infos = self._vendor_hid_infos()
         if not infos:
             return False
@@ -2835,7 +2839,23 @@ class HidGestureListener:
             hidpp_name = None
             for idx in idx_order:
                 self._dev_idx = idx
-                fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=400)
+                fi = self._find_feature(
+                    FEAT_REPROG_V4,
+                    timeout_ms=REPROG_DISCOVERY_TIMEOUT_MS,
+                )
+                if fi is None and idx == idx_order[0]:
+                    # Keep the hot path fast but give the primary candidate
+                    # one longer chance before declaring it unsupported.
+                    fi = self._find_feature(
+                        FEAT_REPROG_V4,
+                        timeout_ms=REPROG_DISCOVERY_RETRY_TIMEOUT_MS,
+                    )
+                    if fi is not None:
+                        print(
+                            "[HidGesture] REPROG_V4 recovered on retry "
+                            f"timeout={REPROG_DISCOVERY_RETRY_TIMEOUT_MS}ms "
+                            f"PID=0x{pid:04X} devIdx=0x{idx:02X}"
+                        )
                 if fi is not None:
                     reprog_found = True
                     self._feat_idx = fi
