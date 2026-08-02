@@ -400,6 +400,51 @@ class HidDiscoveryDiagnosticsTests(unittest.TestCase):
         )
         fake_dev.close.assert_not_called()
 
+    def test_try_connect_retries_primary_reprog_probe_with_longer_timeout(self):
+        listener, info = self._make_listener()
+        fake_dev = _FakeHidDevice()
+        reprog_timeouts = []
+
+        def fake_find_feature(feature_id, *, timeout_ms=None):
+            if feature_id != hid_gesture.FEAT_REPROG_V4:
+                return None
+            reprog_timeouts.append(timeout_ms)
+            if timeout_ms == hid_gesture.REPROG_DISCOVERY_RETRY_TIMEOUT_MS:
+                return 0x10
+            return None
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_find_feature", side_effect=fake_find_feature),
+            patch.object(listener, "_discover_reprog_controls", return_value=[]),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=lambda: fake_dev),
+                create=True,
+            ),
+            patch("builtins.print") as print_mock,
+        ):
+            self.assertTrue(listener._try_connect())
+
+        self.assertGreaterEqual(len(reprog_timeouts), 2)
+        self.assertEqual(
+            reprog_timeouts[:2],
+            [
+                hid_gesture.REPROG_DISCOVERY_TIMEOUT_MS,
+                hid_gesture.REPROG_DISCOVERY_RETRY_TIMEOUT_MS,
+            ],
+        )
+        messages = self._printed_messages(print_mock)
+        self.assertTrue(
+            any("REPROG_V4 recovered on retry" in message for message in messages)
+        )
+
     def test_try_connect_rearms_extra_diverts_on_reconnect(self):
         listener = hid_gesture.HidGestureListener(
             extra_diverts={
@@ -1098,7 +1143,6 @@ class HidBoltReceiverTests(unittest.TestCase):
         }
         fake_dev = _FakeHidDevice()
         call_count = [0]
-
         def fake_find_feature(feature_id, *, timeout_ms=None):
             if feature_id != hid_gesture.FEAT_REPROG_V4:
                 return None
@@ -1143,13 +1187,14 @@ class HidBoltReceiverTests(unittest.TestCase):
             "path": b"/dev/hidraw-test",
         }
         fake_dev = _FakeHidDevice()
-        call_count = [0]
 
         def fake_find_feature(feature_id, *, timeout_ms=None):
             if feature_id != hid_gesture.FEAT_REPROG_V4:
                 return None
-            call_count[0] += 1
-            return 0x09 if call_count[0] >= 2 else None
+            # Non-Bolt receivers probe BT devIdx first; ensure REPROG_V4 only
+            # appears once the receiver slot is tried so transport is labeled
+            # as "USB Receiver".
+            return 0x09 if listener._dev_idx == 1 else None
 
         with (
             patch.object(listener, "_vendor_hid_infos", return_value=[info]),
