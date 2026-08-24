@@ -1,6 +1,7 @@
 import socket
 import threading
 import unittest
+from unittest.mock import Mock
 
 from core.process_bridge import (
     DaemonBridgeServer,
@@ -77,6 +78,29 @@ class ProcessBridgeTests(unittest.TestCase):
     def test_non_whitelisted_method_is_rejected(self):
         with self.assertRaisesRegex(Exception, "method is not allowed"):
             self.server._dispatch("__getattribute__", [], {})
+
+    def test_remote_engine_invalidates_cached_device_when_bridge_disappears(self):
+        from core.process_bridge import RemoteEngine
+
+        remote = RemoteEngine.__new__(RemoteEngine)
+        remote._state_lock = threading.Lock()
+        remote._state = {
+            "device_connected": True,
+            "connected_device": {"key": "mx_master_4"},
+            "hid_features_ready": True,
+            "haptic_supported": True,
+            "smart_shift_supported": True,
+            "force_sensing_supported": True,
+            "force_sensing_range": [20, 80],
+        }
+        remote._callbacks = {"connection": Mock()}
+
+        remote._invalidate_state()
+
+        self.assertFalse(remote._state["device_connected"])
+        self.assertIsNone(remote._state["connected_device"])
+        self.assertFalse(remote._state["hid_features_ready"])
+        remote._callbacks["connection"].assert_called_once_with(False)
 
 
 if __name__ == "__main__":

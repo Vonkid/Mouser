@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 
 import objc
@@ -43,6 +44,7 @@ def _root_dir() -> str:
 
 
 ROOT = _root_dir()
+LAUNCHD_DAEMON_FLAG = "--launchd-daemon"
 
 
 def _settings_command() -> list[str]:
@@ -289,8 +291,20 @@ class MouserAppDelegate(NSObject):
 
 def main() -> int:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    if send_control_message("daemon", "show", timeout=0.2):
-        return 0
+    launched_by_launchd = LAUNCHD_DAEMON_FLAG in sys.argv[1:]
+    if send_control_message("daemon", "ping", timeout=0.2):
+        if not launched_by_launchd:
+            send_control_message("daemon", "show", timeout=0.2)
+            return 0
+        send_control_message("daemon", "quit", timeout=0.3)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if not send_control_message("daemon", "ping", timeout=0.1):
+                break
+            time.sleep(0.05)
+        else:
+            print("[Mouser] Existing daemon did not stop during launchd takeover")
+            return 1
 
     application = NSApplication.sharedApplication()
     application.setActivationPolicy_(NSApplicationActivationPolicyAccessory)

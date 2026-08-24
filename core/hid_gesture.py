@@ -828,6 +828,7 @@ FEAT_BATTERY_STATUS = 0x1000      # Battery Status (fallback)
 FEAT_HAPTIC         = 0x19B0      # Haptic Feedback (MX Master 4)
 FEAT_FORCE_SENSING  = 0x19C0      # Force Sensing Button (MX Master 4)
 DEFAULT_GESTURE_CID = DEFAULT_GESTURE_CIDS[0]
+REPROG_DISCOVERY_TIMEOUT_MS = 400
 
 # REPROG_V4 ``setCidReporting`` control flags (fn 3 byte 2). The
 # protocol packs four bits we ever toggle from this module:
@@ -1041,6 +1042,10 @@ class HidGestureListener:
         self._smart_shift_slot_lock = threading.Lock()
         self._smart_shift_event = threading.Event()
         self._reconnect_requested = False
+        self._wake_requested = False
+        self._reconnect_event = threading.Event()
+        self._capture_generation = 0
+        self._has_seen_device = False
         # signature -> monotonic deadline; see _REPROG_ABSENT_COOLDOWN_S.
         self._reprog_absent_until = {}
         self._pending_battery = None
@@ -1098,6 +1103,8 @@ class HidGestureListener:
                     "Logitech HID++ devices may not enumerate"
                 )
         self._running = True
+        self._wake_requested = False
+        self._reconnect_event.clear()
         _register_atexit_listener(self)
         self._thread = threading.Thread(
             target=self._main_loop, daemon=True, name="HidGesture")
@@ -1122,6 +1129,7 @@ class HidGestureListener:
                 print(f"[HidGesture] stop: horizontal invert revert failed: {exc}")
             self._wheel_divert_state = False
         self._running = False
+        self._reconnect_event.set()
         d = self._dev
         if d:
             try:
@@ -1996,6 +2004,14 @@ class HidGestureListener:
         re-applying all button diverts (including CID 0x00C4).
         """
         self._reconnect_requested = True
+        self._reprog_absent_until.clear()
+        self._reconnect_event.set()
+
+    def notify_wake(self):
+        """Record a macOS wake without performing HID I/O in the callback."""
+        self._wake_requested = True
+        self._reprog_absent_until.clear()
+        self._reconnect_event.set()
 
     def read_smart_shift(self):
         """Queue a Smart Shift read.
@@ -2916,7 +2932,10 @@ class HidGestureListener:
             hidpp_name = None
             for idx in idx_order:
                 self._dev_idx = idx
-                fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=400)
+                fi = self._find_feature(
+                    FEAT_REPROG_V4,
+                    timeout_ms=REPROG_DISCOVERY_TIMEOUT_MS,
+                )
                 if fi is not None:
                     reprog_found = True
                     self._feat_idx = fi
@@ -3132,6 +3151,8 @@ class HidGestureListener:
                             )
                         except Exception as exc:
                             print(f"[HidGesture] Cache write skipped: {exc}")
+                        self._capture_generation += 1
+                        self._has_seen_device = True
                         self._reprog_absent_until.pop(cand_key, None)
                         return True
                     continue     # divert failed -- try next receiver slot
@@ -3158,10 +3179,14 @@ class HidGestureListener:
     def _interruptible_sleep(self, seconds):
         """Sleep up to ``seconds`` in 0.1 s slices, returning early if the
         listener has been stopped so teardown stays responsive."""
-        for _ in range(int(max(0.0, seconds) / 0.1)):
-            if not self._running:
+        deadline = time.monotonic() + max(0.0, seconds)
+        while self._running:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return
-            time.sleep(0.1)
+            if self._reconnect_event.wait(min(0.1, remaining)):
+                self._reconnect_event.clear()
+                return
 
     def _main_loop(self):
         """Outer loop: connect → listen → reconnect on error/disconnect."""
@@ -3175,6 +3200,12 @@ class HidGestureListener:
         _CONNECT_BACKOFF_MAX_S = 30.0
         connect_backoff_s = _CONNECT_BACKOFF_BASE_S
         while self._running:
+            if not self._connected and (
+                self._reconnect_requested or self._wake_requested
+            ):
+                self._reconnect_requested = False
+                self._wake_requested = False
+                self._reconnect_event.clear()
             if not self._try_connect():
                 if not retry_logged:
                     print(
@@ -3182,10 +3213,11 @@ class HidGestureListener:
                         f"backoff up to {_CONNECT_BACKOFF_MAX_S:.0f} s…"
                     )
                     retry_logged = True
-                self._interruptible_sleep(connect_backoff_s)
-                connect_backoff_s = min(
-                    connect_backoff_s * 2, _CONNECT_BACKOFF_MAX_S
+                max_backoff_s = (
+                    8.0 if self._has_seen_device else _CONNECT_BACKOFF_MAX_S
                 )
+                connect_backoff_s = min(connect_backoff_s * 2, max_backoff_s)
+                self._interruptible_sleep(connect_backoff_s)
                 continue
             retry_logged = False
             connect_backoff_s = _CONNECT_BACKOFF_BASE_S
@@ -3200,14 +3232,22 @@ class HidGestureListener:
             _no_data_count = 0          # consecutive _rx() returning None
             _STALE_HOLD_LIMIT = 3       # force-release held buttons after this many empty reads (~3 s)
             _CONSECUTIVE_TIMEOUT_RECONNECT = 3  # force reconnect after this many request timeouts
-            _SLEEP_TIMEOUT_S = 300      # abandon handle after 5 min asleep
+            _STALE_CHANNEL_GRACE_S = 6  # evict a dead channel after two probe windows
+            _HEALTH_PROBE_INTERVAL_S = 4
             self._consecutive_request_timeouts = 0
             _device_asleep = False
             _device_sleep_time = None
+            _next_health_probe = time.monotonic() + _HEALTH_PROBE_INTERVAL_S
+            channel_stale = False
             try:
                 while self._running:
+                    if self._wake_requested:
+                        self._wake_requested = False
+                        self._reconnect_event.clear()
+                        raise IOError("macOS wake requested")
                     if self._reconnect_requested:
                         self._reconnect_requested = False
+                        self._reconnect_event.clear()
                         raise IOError("reconnect requested")
 
                     if self._consecutive_request_timeouts >= _CONSECUTIVE_TIMEOUT_RECONNECT:
@@ -3229,10 +3269,10 @@ class HidGestureListener:
 
                     if _device_asleep:
                         if (time.monotonic() - _device_sleep_time
-                                >= _SLEEP_TIMEOUT_S):
-                            print("[HidGesture] Sleep timeout "
-                                  "— falling back to full reconnect")
-                            raise IOError("sleep timeout — device may be gone")
+                                >= _STALE_CHANNEL_GRACE_S):
+                            print("[HidGesture] HID channel stayed silent "
+                                  "— evicting stale channel")
+                            raise IOError("stale HID channel")
                         self._drain_pending_requests()
                         raw = self._rx(1000)
                         if raw:
@@ -3276,11 +3316,26 @@ class HidGestureListener:
                         # device stops sending reports (firmware stall / sleep).
                         if _no_data_count >= _STALE_HOLD_LIMIT:
                             self._force_release_stale_holds()
+                        if (
+                            _no_data_count >= _STALE_HOLD_LIMIT
+                            and time.monotonic() >= _next_health_probe
+                        ):
+                            self._find_feature(
+                                FEAT_REPROG_V4,
+                                timeout_ms=REPROG_DISCOVERY_TIMEOUT_MS,
+                            )
+                            _next_health_probe = (
+                                time.monotonic() + _HEALTH_PROBE_INTERVAL_S
+                            )
             except Exception as e:
+                channel_stale = True
                 print(f"[HidGesture] read error: {e}")
 
             # Cleanup before potential reconnect
-            self._undivert()
+            if channel_stale:
+                print("[HidGesture] Skipping undivert on stale HID channel")
+            else:
+                self._undivert()
             try:
                 if self._dev:
                     self._dev.close()
@@ -3327,6 +3382,10 @@ class HidGestureListener:
             self._gesture_cid = DEFAULT_GESTURE_CID
             self._gesture_candidates = list(DEFAULT_GESTURE_CIDS)
             self._rawxy_enabled = False
+            self._rawxy_owner = "gesture"
+            self._extra_divert_acks.clear()
+            self._thumb_button_cid = None
+            self._extra_held_during_gesture = False
             self._connected_device_info = None
             self._reconnect_requested = False
             if self._connected:

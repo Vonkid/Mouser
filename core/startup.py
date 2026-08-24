@@ -52,8 +52,34 @@ def _program_arguments():
     """Argv list for macOS LaunchAgent ProgramArguments."""
     exe = os.path.abspath(sys.executable)
     if getattr(sys, "frozen", False):
-        return [exe]
-    return [exe, os.path.abspath(sys.argv[0])]
+        if sys.platform == "darwin":
+            exe = _macos_daemon_executable(exe)
+        arguments = [exe]
+    else:
+        arguments = [exe, os.path.abspath(sys.argv[0])]
+    if sys.platform == "darwin":
+        arguments.append("--launchd-daemon")
+    return arguments
+
+
+def _macos_daemon_executable(executable: str) -> str:
+    """Resolve a packaged UI helper path to the resident daemon path."""
+    helper_suffix = os.path.join(
+        "Contents",
+        "Helpers",
+        "MouserUI.bundle",
+        "Contents",
+        "Resources",
+        "MouserUI.app",
+        "Contents",
+        "MacOS",
+        "MouserUI",
+    )
+    normalized = os.path.normpath(executable)
+    if normalized.endswith(helper_suffix):
+        app_root = normalized[: -len(helper_suffix)].rstrip(os.sep)
+        return os.path.join(app_root, "Contents", "MacOS", "Mouser")
+    return executable
 
 
 def _runtime_root_dir() -> str:
@@ -452,6 +478,7 @@ def _apply_macos(enabled: bool) -> None:
             "Label": MACOS_LAUNCH_AGENT_LABEL,
             "ProgramArguments": _program_arguments(),
             "RunAtLoad": True,
+            "KeepAlive": True,
         }
         new_plist = plistlib.dumps(payload, fmt=plistlib.FMT_XML)
         try:

@@ -589,7 +589,11 @@ class MouseHook(BaseMouseHook):
                     flush=True,
                 )
             if hg:
-                hg.force_reconnect()
+                notify_wake = getattr(hg, "notify_wake", None)
+                if notify_wake is not None:
+                    notify_wake()
+                else:
+                    hg.force_reconnect()
 
         def _on_wake(notification):
             _re_enable_tap_and_reconnect("wake")

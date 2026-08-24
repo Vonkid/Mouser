@@ -265,7 +265,7 @@ class Backend(QObject):
     _showRingRequest = Signal(list, bool)
     _hideRingRequest = Signal()
 
-    def __init__(self, engine=None, parent=None, root_dir=None):
+    def __init__(self, engine=None, parent=None, root_dir=None, *, sync_login_startup=True):
         super().__init__(parent)
         self._engine = engine
         self._root_dir = root_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -399,7 +399,7 @@ class Backend(QObject):
             self._hid_features_ready = bool(
                 getattr(engine, "hid_features_ready", False)
             )
-        if supports_login_startup():
+        if sync_login_startup and supports_login_startup():
             try:
                 sync_login_startup_from_config(self.startAtLogin)
             except Exception as exc:

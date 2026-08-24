@@ -304,7 +304,33 @@ class RemoteEngine:
                 message = str(exc)
                 if message != self._last_error:
                     self._last_error = message
+                    self._invalidate_state()
                     self._emit("status", message)
+
+    def _invalidate_state(self):
+        """Drop device capabilities when the daemon bridge disappears."""
+        with self._state_lock:
+            previous = self._state
+            if not previous:
+                return
+            state = dict(previous)
+            state.update(
+                {
+                    "connected_device": None,
+                    "device_connected": False,
+                    "force_sensing_range": None,
+                    "force_sensing_supported": False,
+                    "haptic_supported": False,
+                    "hid_features_ready": False,
+                    "smart_shift_supported": False,
+                }
+            )
+            self._state = state
+        if (
+            previous.get("device_connected")
+            or previous.get("connected_device") is not None
+        ):
+            self._emit("connection", False)
 
     def _refresh_state(self, *, notify):
         state = self._request("get_state") or {}

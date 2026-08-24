@@ -31,6 +31,7 @@ class ProcessSplitPolicyTests(unittest.TestCase):
         self.assertIn('process_command("--settings-process")', source)
         helper_source = (ROOT / "core" / "on_demand_ui.py").read_text(encoding="utf-8")
         self.assertIn('"Helpers",', helper_source)
+        self.assertIn('"MouserUI.bundle",', helper_source)
         self.assertIn('"MouserUI.app",', helper_source)
         settings_source = (ROOT / "main_qml.py").read_text(encoding="utf-8")
         self.assertIn('RemoteEngine.from_environment()', settings_source)
@@ -41,7 +42,7 @@ class ProcessSplitPolicyTests(unittest.TestCase):
         self.assertIn('["mouser_daemon_launcher.py"]', source)
         self.assertIn('["mouser_ui_launcher.py"]', source)
         self.assertIn('excludes=[\n        "PySide6",', source)
-        self.assertIn('"Contents", "Helpers", "MouserUI.app"', source)
+        self.assertIn('"Contents", "Helpers", "MouserUI.bundle"', source)
 
     def test_qt_tools_are_on_demand_workers(self):
         source = (ROOT / "core" / "on_demand_ui.py").read_text(encoding="utf-8")

@@ -137,7 +137,7 @@ class ApplyLoginStartupMacTests(unittest.TestCase):
 
         self.assertEqual(
             args,
-            ["/opt/homebrew/bin/python3", "/tmp/Mouser/main_qml.py"],
+            ["/opt/homebrew/bin/python3", "/tmp/Mouser/main_qml.py", "--launchd-daemon"],
         )
 
     def test_program_arguments_use_bundle_executable_when_frozen(self):
@@ -149,7 +149,28 @@ class ApplyLoginStartupMacTests(unittest.TestCase):
         ):
             args = st._program_arguments()
 
-        self.assertEqual(args, ["/Applications/Mouser.app/Contents/MacOS/Mouser"])
+        self.assertEqual(
+            args,
+            ["/Applications/Mouser.app/Contents/MacOS/Mouser", "--launchd-daemon"],
+        )
+
+    def test_program_arguments_use_daemon_when_called_from_ui_helper(self):
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(
+                sys,
+                "executable",
+                "/Applications/Mouser.app/Contents/Helpers/MouserUI.bundle/Contents/Resources/MouserUI.app/Contents/MacOS/MouserUI",
+            ),
+            patch("os.path.abspath", side_effect=lambda p: p),
+        ):
+            args = st._program_arguments()
+
+        self.assertEqual(
+            args,
+            ["/Applications/Mouser.app/Contents/MacOS/Mouser", "--launchd-daemon"],
+        )
 
     def test_macos_plist_path_uses_canonical_launch_agent_name(self):
         with patch("os.path.expanduser", side_effect=lambda p: p.replace("~", "/Users/test")):
@@ -181,6 +202,7 @@ class ApplyLoginStartupMacTests(unittest.TestCase):
                 payload = plistlib.load(f)
             self.assertEqual(payload["ProgramArguments"], ["/X/Mouser"])
             self.assertTrue(payload["RunAtLoad"])
+            self.assertTrue(payload["KeepAlive"])
             self.assertEqual(m_lc.call_count, 1)
             m_lc.assert_called_with(
                 ["launchctl", "bootstrap", domain, plist]

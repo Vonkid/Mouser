@@ -1058,6 +1058,7 @@ class HidForceReconnectTests(unittest.TestCase):
         self.assertFalse(listener._reconnect_requested)
         listener.force_reconnect()
         self.assertTrue(listener._reconnect_requested)
+        self.assertTrue(listener._reconnect_event.is_set())
 
     def test_reconnect_flag_cleared_and_raises(self):
         """Inner loop should clear flag and raise IOError when _reconnect_requested is True."""

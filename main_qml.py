@@ -1125,7 +1125,11 @@ def _run_settings_process():
     cfg = load_config()
     locale_mgr = LocaleManager(language=cfg.get("settings", {}).get("language", "en"))
     remote_engine = RemoteEngine.from_environment()
-    backend = Backend(remote_engine, root_dir=ROOT)
+    backend = Backend(
+        remote_engine,
+        root_dir=ROOT,
+        sync_login_startup=False,
+    )
     ui_state = UiState(app)
     ui_state.appearanceMode = backend.appearanceMode
     backend.settingsChanged.connect(

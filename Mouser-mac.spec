@@ -11,6 +11,7 @@ environment supports it:
 
 import os
 import json
+import plistlib
 import shutil
 import subprocess
 
@@ -309,6 +310,7 @@ ui_app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "Mouser UI",
         "CFBundleName": "MouserUI",
+        "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": APP_VERSION,
         "CFBundleVersion": APP_VERSION,
         "LSMinimumSystemVersion": "12.0",
@@ -399,12 +401,38 @@ app = BUNDLE(
 )
 
 ui_helper_destination = os.path.join(
-    ROOT, "dist", "Mouser.app", "Contents", "Helpers", "MouserUI.app"
+    ROOT, "dist", "Mouser.app", "Contents", "Helpers", "MouserUI.bundle"
+)
+ui_helper_app_destination = os.path.join(
+    ui_helper_destination, "Contents", "Resources", "MouserUI.app"
 )
 if os.path.exists(ui_helper_destination):
     shutil.rmtree(ui_helper_destination)
+os.makedirs(os.path.dirname(ui_helper_app_destination), exist_ok=True)
 shutil.copytree(
     os.path.join(ROOT, "dist", "MouserUI.app"),
-    ui_helper_destination,
+    ui_helper_app_destination,
     symlinks=True,
 )
+
+ui_inner_info = os.path.join(ui_helper_app_destination, "Contents", "Info.plist")
+with open(ui_inner_info, "rb") as info_file:
+    inner_ui_info = plistlib.load(info_file)
+inner_ui_info["CFBundlePackageType"] = "BNDL"
+with open(ui_inner_info, "wb") as info_file:
+    plistlib.dump(inner_ui_info, info_file, fmt=plistlib.FMT_BINARY)
+
+ui_helper_info = os.path.join(ui_helper_destination, "Contents", "Info.plist")
+ui_info = {
+    "CFBundleDisplayName": "Mouser UI helper container",
+    "CFBundleName": "MouserUI.bundle",
+    "CFBundleIdentifier": f"{BUNDLE_ID}.ui.container",
+    "CFBundleInfoDictionaryVersion": "6.0",
+    "CFBundlePackageType": "BNDL",
+    "CFBundleShortVersionString": APP_VERSION,
+    "CFBundleVersion": APP_VERSION,
+    "LSMinimumSystemVersion": "12.0",
+}
+os.makedirs(os.path.dirname(ui_helper_info), exist_ok=True)
+with open(ui_helper_info, "wb") as info_file:
+    plistlib.dump(ui_info, info_file, fmt=plistlib.FMT_BINARY)
